@@ -1,106 +1,115 @@
 import csv
-import os
-from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Tuple, TypeVar
+from pathlib import Path
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TypeVar
 
 
 Result = TypeVar('Result')
-
-
-class Table:
-    def __init__(self, columns: Iterable[str], rows: Iterable[Mapping[str, str]]):
-        self._columns: Tuple[str, ...] = tuple(columns)
-        if len(set(self._columns)) != len(self._columns):
-            raise ValueError("Table columns must be unique")
-
-        self._rows: List[Dict[str, str]] = []
-        expected_columns = set(self._columns)
-        for row in rows:
-            if set(row) != expected_columns:
-                raise ValueError("Each row must contain exactly the table columns")
-            self._rows.append({column: row[column] for column in self._columns})
-
-    @property
-    def columns(self) -> Tuple[str, ...]:
-        return self._columns
-
-    def __iter__(self) -> Iterator[Dict[str, str]]:
-        return (dict(row) for row in self._rows)
-
-    def __len__(self) -> int:
-        return len(self._rows)
-
-    def filter(self, condition: Callable[[Mapping[str, str]], bool]) -> 'Table':
-        matching_rows = (
-            row for row in self._rows if condition(dict(row))
-        )
-        return Table(self._columns, matching_rows)
-
-    def aggregate(
-        self,
-        aggregation_key: str,
-        aggregation_function: Callable[[List[str]], Result],
-    ) -> Result:
-        """Pass column values to the function, including an empty list for empty tables."""
-        if aggregation_key not in self._columns:
-            raise KeyError("Unknown table column: {}".format(aggregation_key))
-        values = [row[aggregation_key] for row in self._rows]
-        return aggregation_function(values)
+Row = Dict[str, str]
 
 
 class DataLoader:
-    @staticmethod
-    def load_csv(filepath: str) -> Table:
-        with open(filepath, newline='', encoding='utf-8') as csv_file:
+    """Load CSV files as lists of dictionaries."""
+
+    def __init__(self, base_path: Optional[Path] = None):
+        self.base_path = Path(base_path) if base_path is not None else Path(__file__).parent.resolve()
+
+    def load_csv(self, filename: str) -> List[Row]:
+        filepath = self.base_path / filename
+        with filepath.open(newline='', encoding='utf-8') as csv_file:
             rows = csv.DictReader(csv_file)
             if rows.fieldnames is None:
                 raise ValueError("CSV file must contain a header row")
-            return Table(rows.fieldnames, rows)
+            return [dict(row) for row in rows]
 
 
-def average_temperature(values: List[str]) -> float:
-    if not values:
-        raise ValueError("Cannot average an empty temperature column")
-    return sum(float(value) for value in values) / len(values)
+class Table:
+    """A named collection of dictionary rows with filtering and aggregation."""
+
+    def __init__(
+        self,
+        table_name: str,
+        table: Iterable[Mapping[str, str]],
+        columns: Optional[Sequence[str]] = None,
+    ):
+        self.table_name = table_name
+        self.table = [dict(row) for row in table]
+        self.columns = tuple(columns) if columns is not None else (
+            tuple(self.table[0]) if self.table else tuple()
+        )
+        if len(set(self.columns)) != len(self.columns):
+            raise ValueError("Table columns must be unique")
+        expected_columns = set(self.columns)
+        if any(set(row) != expected_columns for row in self.table):
+            raise ValueError("Each row must contain exactly the table columns")
+
+    def filter(self, condition: Callable[[Mapping[str, str]], bool]) -> 'Table':
+        filtered_rows = [row for row in self.table if condition(dict(row))]
+        return Table(self.table_name + '_filtered', filtered_rows, self.columns)
+
+    def aggregate(
+        self,
+        aggregation_function: Callable[[List[object]], Result],
+        aggregation_key: str,
+    ) -> Result:
+        if aggregation_key not in self.columns:
+            raise KeyError("Unknown table column: {}".format(aggregation_key))
+        values: List[object] = [row[aggregation_key] for row in self.table]
+        if values:
+            try:
+                values = [float(value) for value in values]
+            except (TypeError, ValueError):
+                pass
+        return aggregation_function(values)
+
+    def __iter__(self) -> Iterator[Row]:
+        return (dict(row) for row in self.table)
+
+    def __len__(self) -> int:
+        return len(self.table)
+
+    def __str__(self) -> str:
+        return self.table_name + ':' + str(self.table)
 
 
 def main() -> None:
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Cities.csv')
-    cities = DataLoader.load_csv(data_path)
+    loader = DataLoader()
+    cities = loader.load_csv('Cities.csv')
+    cities_table = Table('cities', cities)
 
-    # Print first 5 cities only
-    for city in list(cities)[:5]:
-        print(city)
-
-    # Print the average temperature of all the cities
-    print("The average temperature of all the cities:")
-    print(cities.aggregate('temperature', average_temperature))
+    print(cities_table.aggregate(lambda values: sum(values) / len(values), 'temperature'))
     print()
 
-    # Print all cities in Germany
-    german_cities = cities.filter(lambda city: city['country'] == 'Germany')
-    for city in german_cities:
-        print(city)
+    german_cities = cities_table.filter(lambda city: city['country'] == 'Germany')
+    print("All the cities in Germany:")
+    for city in german_cities.table:
+        print([city['city'], city['country']])
+    print()
 
-    # Print all cities in Spain with a temperature above 12°C
-    spanish_cities = cities.filter(
-        lambda city: city['country'] == 'Spain' and float(city['temperature']) > 12
+    spanish_cities = cities_table.filter(
+        lambda city: city['country'] == 'Spain' and float(city['temperature']) > 12.0
     )
-    for city in spanish_cities:
-        print(city)
+    print("All the cities in Spain with temperature above 12 C:")
+    for city in spanish_cities.table:
+        print([city['city'], city['country'], city['temperature']])
+    print()
 
-    # Count the number of unique countries
-    unique_country_count = cities.aggregate('country', lambda values: len(set(values)))
-    print("The number of unique countries:")
-    print(unique_country_count)
+    print("The number of unique countries is:")
+    print(cities_table.aggregate(lambda values: len(set(values)), 'country'))
+    print()
 
-    # Print the average temperature for all the cities in Germany
-    print("The average temperature for all the cities in Germany:")
-    print(german_cities.aggregate('temperature', average_temperature))
+    german_average = german_cities.aggregate(
+        lambda values: sum(values) / len(values), 'temperature'
+    )
+    print("The average temperature of all the cities in Germany:")
+    print(german_average)
+    print()
 
-    # Print the max temperature for all the cities in Italy
-    italian_cities = cities.filter(lambda city: city['country'] == 'Italy')
-    print("The max temperature for all the cities in Italy:")
-    print(italian_cities.aggregate('temperature', lambda values: max(map(float, values))))
+    italian_maximum = cities_table.filter(
+        lambda city: city['country'] == 'Italy'
+    ).aggregate(lambda values: max(values), 'temperature')
+    print("The max temperature of all the cities in Italy:")
+    print(italian_maximum)
+    print()
 
 
 if __name__ == '__main__':
