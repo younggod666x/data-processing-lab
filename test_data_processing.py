@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from data_processing import DataLoader, Table
+from data_processing import DB, DataLoader, Table
 
 
 class TableTests(unittest.TestCase):
@@ -56,6 +56,35 @@ class TableTests(unittest.TestCase):
             "{'country': 'Spain', 'temperature': '15.0'}]",
         )
 
+    def test_join_combines_matching_rows_and_omits_duplicate_key(self):
+        country_table = Table(
+            'countries',
+            [
+                {'country': 'Germany', 'EU': 'yes'},
+                {'country': 'France', 'EU': 'yes'},
+            ],
+        )
+
+        joined = self.table.join(country_table, 'country')
+
+        self.assertEqual(joined.table_name, 'cities_countries_joined')
+        self.assertEqual(
+            joined.table,
+            [{'country': 'Germany', 'temperature': '8.5', 'EU': 'yes'}],
+        )
+        self.assertEqual(
+            joined.columns,
+            ('country', 'temperature', 'EU'),
+        )
+
+    def test_join_rejects_missing_key_and_ambiguous_columns(self):
+        other = Table('other', [{'country': 'Germany', 'temperature': '9.0'}])
+
+        with self.assertRaises(KeyError):
+            self.table.join(other, 'missing')
+        with self.assertRaises(ValueError):
+            self.table.join(other, 'country')
+
 
 class DataLoaderTests(unittest.TestCase):
     def test_load_csv_returns_list_of_dictionary_rows(self):
@@ -72,6 +101,50 @@ class DataLoaderTests(unittest.TestCase):
                 {'city': 'Madrid', 'country': 'Spain'},
             ],
         )
+
+    def test_countries_dataset_supports_expected_join_results(self):
+        loader = DataLoader()
+        cities = Table('cities', loader.load_csv('Cities.csv'))
+        countries = Table('countries', loader.load_csv('Countries.csv'))
+        joined = cities.join(countries, 'country')
+        eu_landlocked = joined.filter(
+            lambda row: row['EU'] == 'yes' and row['coastline'] == 'no'
+        )
+
+        self.assertEqual(
+            countries.filter(lambda row: row['coastline'] == 'yes').aggregate(
+                lambda values: len(values), 'coastline'
+            ),
+            29,
+        )
+        self.assertEqual(len(joined), len(cities))
+        self.assertEqual(
+            eu_landlocked.aggregate(lambda values: min(values), 'temperature'),
+            4.54,
+        )
+        self.assertEqual(
+            eu_landlocked.aggregate(lambda values: max(values), 'temperature'),
+            10.34,
+        )
+
+
+class DBTests(unittest.TestCase):
+    def test_insert_and_search_named_table(self):
+        table = Table('cities', [{'city': 'Augsburg'}])
+        database = DB()
+        database.insert(table)
+
+        self.assertIs(database.search('cities'), table)
+        self.assertEqual(database.tables, [table])
+
+    def test_insert_rejects_duplicate_names_and_search_missing_table(self):
+        database = DB()
+        database.insert(Table('cities', [{'city': 'Augsburg'}]))
+
+        with self.assertRaises(ValueError):
+            database.insert(Table('cities', [{'city': 'Berlin'}]))
+        with self.assertRaises(KeyError):
+            database.search('countries')
 
 
 if __name__ == '__main__':
